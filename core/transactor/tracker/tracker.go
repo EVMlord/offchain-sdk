@@ -45,13 +45,14 @@ func (t *Tracker) Unsubscribe(ch chan *InFlightTx) {
 }
 
 // Track adds a transaction to the in-flight list.
-func (t *Tracker) Track(ctx context.Context, tx *InFlightTx, async bool) {
+func (t *Tracker) Track(
+	ctx context.Context, tx *InFlightTx, async bool,
+) {
 	if async {
-		// todo: handle error
 		go t.track(ctx, tx)
-		return
+	} else {
+		t.track(ctx, tx)
 	}
-	t.track(ctx, tx)
 }
 
 // track adds a transaction to the in-flight list.
@@ -99,6 +100,10 @@ loop:
 func (t *Tracker) watchTx(ctx context.Context, tx *InFlightTx) {
 	sCtx := sdk.UnwrapContext(ctx)
 	ethClient := sCtx.Chain()
+	var (
+		receipt *coretypes.Receipt
+		err     error
+	)
 
 	// We want to notify the dispatcher at the end of this function.
 	defer t.dispatcher.Dispatch(tx)
@@ -116,7 +121,7 @@ func (t *Tracker) watchTx(ctx context.Context, tx *InFlightTx) {
 			return
 		default:
 			// Else check for the receipt again.
-			receipt, err := ethClient.TransactionReceipt(ctx, tx.Hash())
+			receipt, err = ethClient.TransactionReceipt(ctx, tx.Hash())
 			switch {
 			case errors.Is(err, ethereum.NotFound):
 				time.Sleep(retryPendingBackoff)

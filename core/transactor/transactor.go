@@ -51,7 +51,7 @@ func NewTransactor(
 		dispatcher: dispatcher,
 		cfg:        cfg,
 		factory:    factory,
-		sender:     sender.New(factory),
+		sender:     sender.New(factory, noncer),
 		noncer:     noncer,
 		tracker:    tracker.New(noncer, dispatcher, cfg.TxReceiptTimeout),
 		requests:   queue,
@@ -60,14 +60,18 @@ func NewTransactor(
 
 	// Register the tracker as a subscriber to the tracker.
 	ch := make(chan *tracker.InFlightTx, 1024) //nolint:gomnd // its okay.
-	txrSub := tracker.SubscriberWrapper{Subscriber: txr}
-	go func() { _ = txrSub.Start(context.Background(), ch) }()
+	go func() {
+		// TODO: handle error
+		_ = tracker.NewSubscription(txr, txr.logger).Start(context.Background(), ch)
+	}()
 	dispatcher.Subscribe(ch)
 
 	// Register the sender as a subscriber to the tracker.
 	ch2 := make(chan *tracker.InFlightTx, 1024) //nolint:gomnd // its okay.
-	senderSub := tracker.SubscriberWrapper{Subscriber: txr.sender}
-	go func() { _ = senderSub.Start(context.Background(), ch2) }()
+	go func() {
+		// TODO: handle error
+		_ = tracker.NewSubscription(txr.sender, txr.logger).Start(context.Background(), ch2)
+	}()
 	dispatcher.Subscribe(ch2)
 
 	return txr
@@ -76,6 +80,17 @@ func NewTransactor(
 // RegistryKey implements job.Basic.
 func (t *TxrV2) RegistryKey() string {
 	return "transactor"
+}
+
+// SubscribeTxResults sends the tx results (inflight) to the given channel.
+func (t *TxrV2) SubscribeTxResults(
+	ctx context.Context, subscriber tracker.Subscriber, ch chan *tracker.InFlightTx,
+) {
+	go func() {
+		// TODO: handle error
+		_ = tracker.NewSubscription(subscriber, t.logger).Start(ctx, ch)
+	}()
+	t.dispatcher.Subscribe(ch)
 }
 
 // Execute implements job.Basic.
@@ -112,10 +127,15 @@ func (t *TxrV2) SendTxRequest(txReq *types.TxRequest) (string, error) {
 // Start starts the transactor.
 func (t *TxrV2) Start(ctx context.Context) {
 	go t.mainLoop(ctx)
+	go t.noncer.RefreshLoop(ctx)
 }
 
 // mainLoop is the main transaction sending / batching loop.
 func (t *TxrV2) mainLoop(ctx context.Context) {
+	if err := t.noncer.InitializeExistingTxs(ctx); err != nil {
+		panic(err)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -136,7 +156,7 @@ func (t *TxrV2) mainLoop(ctx context.Context) {
 			t.mu.Lock()
 			go func() {
 				defer t.mu.Unlock()
-				if err := t.sendAndTrack(ctx, msgIDs, batch); err != nil {
+				if err := t.sendAndTrack(ctx, msgIDs, batch...); err != nil {
 					t.logger.Error("failed to process batch", "err", err)
 				}
 			}()
@@ -170,9 +190,9 @@ func (t *TxrV2) retrieveBatch(_ context.Context) ([]string, []*types.TxRequest) 
 // It builds a transaction from the batch and sends it.
 // It also tracks the transaction for future reference.
 func (t *TxrV2) sendAndTrack(
-	ctx context.Context, msgIDs []string, batch []*types.TxRequest,
+	ctx context.Context, msgIDs []string, batch ...*types.TxRequest,
 ) error {
-	tx, err := t.factory.BuildTransactionFromRequests(ctx, batch)
+	tx, err := t.factory.BuildTransactionFromRequests(ctx, batch...)
 	if err != nil {
 		return err
 	}
@@ -185,9 +205,13 @@ func (t *TxrV2) sendAndTrack(
 	// t.logger.Debug("📡 sent transaction", "tx-hash", tx.Hash().Hex(), "tx-reqs", len(batch))
 
 	// Spin off a goroutine to track the transaction.
-	t.tracker.Track(ctx, &tracker.InFlightTx{
-		Transaction: tx,
-		MsgIDs:      msgIDs,
-	}, true)
+	t.tracker.Track(
+		ctx,
+		&tracker.InFlightTx{
+			Transaction: tx,
+			MsgIDs:      msgIDs,
+		},
+		true,
+	)
 	return nil
 }

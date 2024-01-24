@@ -46,7 +46,7 @@ func NewQueueFromConfig[T types.Marshallable](cfg aws.Config, queueURL string) (
 }
 
 func NewQueue[T types.Marshallable](
-	region, accessKeyID, secretKey string, queueURL string,
+	region, accessKeyID, secretKey, queueURL string,
 ) (*Queue[T], error) {
 	awsCfg, _ := config.LoadDefaultConfig(
 		context.Background(), func(cfg *config.LoadOptions) error {
